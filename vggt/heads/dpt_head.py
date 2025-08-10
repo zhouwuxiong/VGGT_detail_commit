@@ -137,10 +137,13 @@ class DPTHead(nn.Module):
         B, S, _, H, W = images.shape
 
         # If frames_chunk_size is not specified or greater than S, process all frames at once
+        # 如果输入的视角图像比较少则一次全部处理，默认 frames_chunk_size = 4
+        # 可能是为了处理多摄像头视频流，frames_chunk_size 则是摄像头的数量
         if frames_chunk_size is None or frames_chunk_size >= S:
             return self._forward_impl(aggregated_tokens_list, images, patch_start_idx)
 
         # Otherwise, process frames in chunks to manage memory usage
+        # 如果要处理的视角图像数量太多，就进行分阶段处理以降低内存占用
         assert frames_chunk_size > 0
 
         # Process frames in batches
@@ -202,28 +205,33 @@ class DPTHead(nn.Module):
         out = []
         dpt_idx = 0
 
+        # layer_idx 指定使用哪层网的输出做预测，有点类似于 SSD 使用不同的输出层进行结构预测以适应不同尺度的目标，
         for layer_idx in self.intermediate_layer_idx:
-            x = aggregated_tokens_list[layer_idx][:, :, patch_start_idx:]
+            x = aggregated_tokens_list[layer_idx][:, :, patch_start_idx:] # x = [B,S,P_start,2C]
 
             # Select frames if processing a chunk
+            # 对 S 维度进行切片
             if frames_start_idx is not None and frames_end_idx is not None:
                 x = x[:, frames_start_idx:frames_end_idx]
 
             x = x.reshape(B * S, -1, x.shape[-1])
 
-            x = self.norm(x)
+            x = self.norm(x) # LayerNorm
 
+            # [B*S,P,2C] -> [B*S,2C,H,W]
             x = x.permute(0, 2, 1).reshape((x.shape[0], x.shape[-1], patch_h, patch_w))
 
+            # conv2d 做通道缩减,约浅层的特征输出的通道数越少
             x = self.projects[dpt_idx](x)
             if self.pos_embed:
-                x = self._apply_pos_embed(x, W, H)
+                x = self._apply_pos_embed(x, W, H) # out x = [C,H,W]
             x = self.resize_layers[dpt_idx](x)
 
             out.append(x)
             dpt_idx += 1
-
+        # out [4,C,H,W]
         # Fuse features from multiple layers.
+        # 对不同深度层的预测结果做融合
         out = self.scratch_forward(out)
         # Interpolate fused output to match target image resolution.
         out = custom_interpolate(
@@ -246,16 +254,64 @@ class DPTHead(nn.Module):
         conf = conf.view(B, S, *conf.shape[1:])
         return preds, conf
 
+    # input:  [B*S,c',W,H]
     def _apply_pos_embed(self, x: torch.Tensor, W: int, H: int, ratio: float = 0.1) -> torch.Tensor:
         """
-        Apply positional embedding to tensor x.
+        对输入特征图应用可学习的位置编码（基于正弦余弦的2D位置编码）
+
+        输入输出规格：
+            - 输入 x: [B*S, C, patch_h, patch_w]
+              (B=batch_size, S=序列长度如帧数, C=通道数, patch_h/patch_w=特征图高宽)
+            - 输出: [B*S, C, patch_h, patch_w] (与输入同形，已添加位置编码)
+
+        关键步骤：
+        1. 生成归一化的2D坐标网格
+        2. 将坐标转换为多尺度正弦余弦编码
+        3. 调整编码强度后与原始特征相加
+
+        Args:
+            x: 输入特征图，形状 [B*S, C, patch_h, patch_w]
+            W/H: 原始图像的宽高（用于保持宽高比）
+            ratio: 位置编码的强度系数（默认0.1）
+
+        Returns:
+            添加位置编码后的特征图（与输入同形状）
         """
-        patch_w = x.shape[-1]
-        patch_h = x.shape[-2]
-        pos_embed = create_uv_grid(patch_w, patch_h, aspect_ratio=W / H, dtype=x.dtype, device=x.device)
-        pos_embed = position_grid_to_embed(pos_embed, x.shape[1])
-        pos_embed = pos_embed * ratio
-        pos_embed = pos_embed.permute(2, 0, 1)[None].expand(x.shape[0], -1, -1, -1)
+        # 1. 获取特征图的patch网格尺寸
+        patch_w = x.shape[-1]  # 特征图的宽度（patch数量）
+        patch_h = x.shape[-2]  # 特征图的高度（patch数量）
+
+        # 2. 创建归一化的2D坐标网格
+        pos_embed = create_uv_grid(
+            width=patch_w,
+            height=patch_h,
+            aspect_ratio=W / H,  # 保持原始图像宽高比
+            dtype=x.dtype,  # 匹配输入数据类型
+            device=x.device  # 匹配输入设备
+        )
+
+        # 3. 将坐标网格转换为高维位置编码
+        # --------------------------------------------------
+        # 使用正弦余弦函数生成多尺度位置编码
+        # 输出形状 [patch_w, patch_h, C] (C=x.shape[1])
+        pos_embed = position_grid_to_embed(
+            pos_grid=pos_embed,
+            embed_dim=x.shape[1]  # 通道数需与特征图一致
+        )
+
+        # 4. 调整位置编码强度
+        # --------------------------------------------------
+        # 通过ratio控制位置信息的影响程度（默认10%）
+        pos_embed = pos_embed * ratio  # 缩放编码值到[-ratio, ratio]范围
+
+        # 5. 维度调整以匹配输入特征
+        # --------------------------------------------------
+        # 原始编码形状 [H,W,C] -> 转置为 [C,H,W] -> 添加batch维度 -> 扩展到batch大小
+        pos_embed = pos_embed.permute(2, 0, 1)  # [C, H, W]
+        pos_embed = pos_embed[None]  # [1, C, H, W]
+        pos_embed = pos_embed.expand(x.shape[0], -1, -1, -1)  # [B*S, C, H, W]
+
+        # 6. 残差连接方式注入位置信息
         return x + pos_embed
 
     def scratch_forward(self, features: List[torch.Tensor]) -> torch.Tensor:
@@ -270,11 +326,13 @@ class DPTHead(nn.Module):
         """
         layer_1, layer_2, layer_3, layer_4 = features
 
+        # 进行于一次 2D 巻积，调整通道数
         layer_1_rn = self.scratch.layer1_rn(layer_1)
         layer_2_rn = self.scratch.layer2_rn(layer_2)
         layer_3_rn = self.scratch.layer3_rn(layer_3)
         layer_4_rn = self.scratch.layer4_rn(layer_4)
 
+        # 残差输出
         out = self.scratch.refinenet4(layer_4_rn, size=layer_3_rn.shape[2:])
         del layer_4_rn, layer_4
 
@@ -361,7 +419,7 @@ class ResidualConvUnit(nn.Module):
         self.norm2 = None
 
         self.activation = activation
-        self.skip_add = nn.quantized.FloatFunctional()
+        self.skip_add = nn.quantized.FloatFunctional() # 量化安全的加法
 
     def forward(self, x):
         """Forward pass.
@@ -426,9 +484,10 @@ class FeatureFusionBlock(nn.Module):
         self.has_residual = has_residual
         self.resConfUnit2 = ResidualConvUnit(features, activation, bn, groups=self.groups)
 
-        self.skip_add = nn.quantized.FloatFunctional()
+        self.skip_add = nn.quantized.FloatFunctional() # 量化安全的加法
         self.size = size
 
+    # in [C,H,W]
     def forward(self, *xs, size=None):
         """Forward pass.
 
@@ -450,6 +509,7 @@ class FeatureFusionBlock(nn.Module):
         else:
             modifier = {"size": size}
 
+        # 插值
         output = custom_interpolate(output, **modifier, mode="bilinear", align_corners=self.align_corners)
         output = self.out_conv(output)
 

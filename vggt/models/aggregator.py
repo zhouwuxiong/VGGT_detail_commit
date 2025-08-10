@@ -120,7 +120,7 @@ class Aggregator(nn.Module):
         # Validate that depth is divisible by aa_block_size
         if self.depth % self.aa_block_size != 0:
             raise ValueError(f"depth ({depth}) must be divisible by aa_block_size ({aa_block_size})")
-
+        # default： aa_block_size = 1
         self.aa_block_num = self.depth // self.aa_block_size
 
         # Note: We have two camera tokens, one for the first frame and one for the rest
@@ -185,6 +185,7 @@ class Aggregator(nn.Module):
             if hasattr(self.patch_embed, "mask_token"):
                 self.patch_embed.mask_token.requires_grad_(False)
 
+    # inout:  [B, S, 3, H, W] , output: [depth,B , S , P , 2C]
     def forward(self, images: torch.Tensor) -> Tuple[List[torch.Tensor], int]:
         """
         Args:
@@ -204,6 +205,7 @@ class Aggregator(nn.Module):
         # Normalize images and reshape for patch embed
         images = (images - self._resnet_mean) / self._resnet_std
 
+        # Step 1 ： patch embeding
         # Reshape to [B*S, C, H, W] for patch embedding
         images = images.view(B * S, C_in, H, W)
         patch_tokens = self.patch_embed(images)
@@ -220,9 +222,11 @@ class Aggregator(nn.Module):
         # Concatenate special tokens with patch tokens
         tokens = torch.cat([camera_token, register_token, patch_tokens], dim=1)
 
+        # Step 2 ： pos encoding
         pos = None
         if self.rope is not None:
             pos = self.position_getter(B * S, H // self.patch_size, W // self.patch_size, device=images.device)
+        print(pos)
 
         # 检查是否存在需要特殊处理的非图像token
         # patch_start_idx = 0：所有token都是图像patch
@@ -245,6 +249,7 @@ class Aggregator(nn.Module):
         global_idx = 0
         output_list = []
 
+        # Step 3： multi-stage(attention in each depth) and muti-dim(attention in inner-image and inner-batch) self-attention
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:
                 if attn_type == "frame":
@@ -268,7 +273,7 @@ class Aggregator(nn.Module):
         del global_intermediates
         return output_list, self.patch_start_idx
 
-    # 帧注意力块（frame attention block），主要用于处理视频或序列数据中的时序维度（frame维度）
+    # [B * S, P, C] 帧内注意力（处理单帧内的空间关系），自注意力计算发生在 dim = 1 （P）维
     def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
         """
         Process frame attention blocks. We keep tokens in shape (B*S, P, C).
@@ -283,7 +288,7 @@ class Aggregator(nn.Module):
         intermediates = []
 
         # by default, self.aa_block_size=1, which processes one block at a time
-        for _ in range(self.aa_block_size):
+        for _ in range(self.aa_block_size): # 默认逐块处理
             if self.training:
                 tokens = checkpoint(self.frame_blocks[frame_idx], tokens, pos, use_reentrant=self.use_reentrant)
             else:
@@ -293,6 +298,8 @@ class Aggregator(nn.Module):
 
         return tokens, frame_idx, intermediates
 
+    # [B, S * P, C] 全局注意力（处理跨帧/跨Patch的时空关系），自注意力计算发生在 dim = 1 (S*P) 维
+    # 可以认为是对不同源数据之间做自注意力关联，例如: 多视角，多模态输入
     def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None):
         """
         Process global attention blocks. We keep tokens in shape (B, S*P, C).

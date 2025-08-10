@@ -60,6 +60,7 @@ class CameraHead(nn.Module):
         self.trunk_norm = nn.LayerNorm(dim_in)
 
         # Learnable empty camera pose token.
+        # target_dim = 9 , 旋转、平移、缩放
         self.empty_pose_tokens = nn.Parameter(torch.zeros(1, 1, self.target_dim))
         self.embed_pose = nn.Linear(self.target_dim, dim_in)
 
@@ -68,6 +69,7 @@ class CameraHead(nn.Module):
 
         # Adaptive layer normalization without affine parameters.
         self.adaln_norm = nn.LayerNorm(dim_in, elementwise_affine=False, eps=1e-6)
+        # 用 mlp 将特征维度映射到物理输出维度
         self.pose_branch = Mlp(in_features=dim_in, hidden_features=dim_in // 2, out_features=self.target_dim, drop=0)
 
     def forward(self, aggregated_tokens_list: list, num_iterations: int = 4) -> list:
@@ -76,18 +78,19 @@ class CameraHead(nn.Module):
 
         Args:
             aggregated_tokens_list (list): List of token tensors from the network;
-                the last tensor is used for prediction.
+                the last tensor is used for prediction .
             num_iterations (int, optional): Number of iterative refinement steps. Defaults to 4.
 
         Returns:
             list: A list of predicted camera encodings (post-activation) from each iteration.
         """
         # Use tokens from the last block for camera prediction.
-        tokens = aggregated_tokens_list[-1]
+        # 使用最后一层网络的输出作预测
+        tokens = aggregated_tokens_list[-1] # [B,S,P,2C]
 
         # Extract the camera tokens
-        pose_tokens = tokens[:, :, 0]
-        pose_tokens = self.token_norm(pose_tokens)
+        pose_tokens = tokens[:, :, 0]  #  [B, S, P, C] -> [B, S, C]
+        pose_tokens = self.token_norm(pose_tokens) # LayerNorm
 
         pred_pose_enc_list = self.trunk_fn(pose_tokens, num_iterations)
         return pred_pose_enc_list
@@ -110,19 +113,25 @@ class CameraHead(nn.Module):
         for _ in range(num_iterations):
             # Use a learned empty pose for the first iteration.
             if pred_pose_enc is None:
-                module_input = self.embed_pose(self.empty_pose_tokens.expand(B, S, -1))
+                # self.empty_pose_tokens.expand(B, S, -1) [1,1,9] -> [B,S,9]
+                # 将低维物理量转换为适合神经网络处理的隐空间表示
+                module_input = self.embed_pose(self.empty_pose_tokens.expand(B, S, -1)) # nn.Linear  [1,1,9] -> [1,1,2048]
             else:
                 # Detach the previous prediction to avoid backprop through time.
+                # detach() 从计算图中分离pred_pose_enc，阻止梯度通过它向后传播 ,避免梯度在多次迭代中累积导致爆炸/消失
                 pred_pose_enc = pred_pose_enc.detach()
                 module_input = self.embed_pose(pred_pose_enc)
 
             # Generate modulation parameters and split them into shift, scale, and gate components.
+            # chunk() 沿指定维度均分张量
             shift_msa, scale_msa, gate_msa = self.poseLN_modulation(module_input).chunk(3, dim=-1)
 
             # Adaptive layer normalization and modulation.
+            # modulate(x, sft, scl)	对输出层 pose_tokens 进行仿射变换建模，等价于 缩放 -> 平移 -> 旋转 操作
             pose_tokens_modulated = gate_msa * modulate(self.adaln_norm(pose_tokens), shift_msa, scale_msa)
             pose_tokens_modulated = pose_tokens_modulated + pose_tokens
 
+            # 进行多层自注意力操作
             pose_tokens_modulated = self.trunk(pose_tokens_modulated)
             # Compute the delta update for the pose encoding.
             pred_pose_enc_delta = self.pose_branch(self.trunk_norm(pose_tokens_modulated))

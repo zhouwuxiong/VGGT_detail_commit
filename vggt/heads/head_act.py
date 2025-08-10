@@ -22,9 +22,9 @@ def activate_pose(pred_pose_enc, trans_act="linear", quat_act="linear", fl_act="
     Returns:
         Activated pose parameters tensor
     """
-    T = pred_pose_enc[..., :3]
-    quat = pred_pose_enc[..., 3:7]
-    fl = pred_pose_enc[..., 7:]  # or fov
+    T = pred_pose_enc[..., :3] # 3
+    quat = pred_pose_enc[..., 3:7] # 4
+    fl = pred_pose_enc[..., 7:]  # or fov # 2 （fx,fy）
 
     T = base_pose_act(T, trans_act)
     quat = base_pose_act(quat, quat_act)
