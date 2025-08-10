@@ -17,6 +17,7 @@ from tqdm.auto import tqdm
 import viser
 import viser.transforms as viser_tf
 import cv2
+import open3d as o3d
 
 
 try:
@@ -306,9 +307,17 @@ def apply_sky_segmentation(conf: np.ndarray, image_folder: str) -> np.ndarray:
 
 
 parser = argparse.ArgumentParser(description="VGGT demo with viser for 3D visualization")
+# parser.add_argument(
+#     "--image_folder", type=str, default="examples/kitchen/images/", help="Path to folder containing images"
+# )
+# parser.add_argument(
+#     "--image_folder", type=str, default="examples/room/images/", help="Path to folder containing images"
+# )
+
 parser.add_argument(
-    "--image_folder", type=str, default="examples/kitchen/images/", help="Path to folder containing images"
+    "--image_folder", type=str, default="examples/custom", help="Path to folder containing images"
 )
+
 parser.add_argument("--use_point_map", action="store_true", help="Use point map instead of depth-based points")
 parser.add_argument("--background_mode", action="store_true", help="Run the viser server in background mode")
 parser.add_argument("--port", type=int, default=8080, help="Port number for the viser server")
@@ -338,15 +347,18 @@ def main():
     --mask_sky: Apply sky segmentation to filter out sky points
     """
     args = parser.parse_args()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
     print(f"Using device: {device}")
 
     print("Initializing and loading VGGT model...")
     # model = VGGT.from_pretrained("facebook/VGGT-1B")
 
-    model = VGGT()
-    _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
-    model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+    # model = VGGT()
+    # _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
+    # model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+
+    model = VGGT.from_pretrained("facebook/VGGT-1B").to(device)
 
     model.eval()
     model = model.to(device)
@@ -386,6 +398,16 @@ def main():
 
     print("Starting viser visualization...")
 
+    np.save('results/prediction.npy', arr)
+    print("predicton results npy saved in results/prediction.npy ")
+
+    point_clouds = predictions["world_points"]
+    merged_points = point_clouds.reshape(-1, 3)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(merged_points)
+    o3d.io.write_point_cloud("merged_point_cloud.pcd", pcd)
+    print("predicton results pcd saved in results/merged_point_cloud.pcd ")
+
     viser_server = viser_wrapper(
         predictions,
         port=args.port,
@@ -396,6 +418,7 @@ def main():
         image_folder=args.image_folder,
     )
     print("Visualization complete")
+
 
 
 if __name__ == "__main__":

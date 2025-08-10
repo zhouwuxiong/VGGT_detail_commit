@@ -74,6 +74,7 @@ class Aggregator(nn.Module):
         self.__build_patch_embed__(patch_embed, img_size, patch_size, num_register_tokens, embed_dim=embed_dim)
 
         # Initialize rotary position embedding if frequency > 0
+        # 在 Transformer 模型中，Rotary Position Embedding (RoPE) 是一种流行的位置编码方法，它通过旋转矩阵将位置信息注入到注意力机制中
         self.rope = RotaryPositionEmbedding2D(frequency=rope_freq) if rope_freq > 0 else None
         self.position_getter = PositionGetter() if self.rope is not None else None
 
@@ -124,7 +125,9 @@ class Aggregator(nn.Module):
 
         # Note: We have two camera tokens, one for the first frame and one for the rest
         # The same applies for register tokens
+        # camera_token,用于编码首帧或后续帧，用于在计算位姿时以第一帧为参考坐标系
         self.camera_token = nn.Parameter(torch.randn(1, 2, 1, embed_dim))
+        # register_token 用于存储冗余的 token 信息，防止 token 的全局信息聚合发生在图像内部，导致 patch_token 的局部信息丢失. [VISION TRANSFORMERS NEED REGISTERS](https://arxiv.org/pdf/2309.16588)
         self.register_token = nn.Parameter(torch.randn(1, 2, num_register_tokens, embed_dim))
 
         # The patch tokens start after the camera and register tokens
@@ -161,7 +164,7 @@ class Aggregator(nn.Module):
             self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=3, embed_dim=embed_dim)
         else:
             vit_models = {
-                "dinov2_vitl14_reg": vit_large,
+                "dinov2_vitl14_reg": vit_large, # used default
                 "dinov2_vitb14_reg": vit_base,
                 "dinov2_vits14_reg": vit_small,
                 "dinov2_vitg2_reg": vit_giant2,
@@ -178,6 +181,7 @@ class Aggregator(nn.Module):
             )
 
             # Disable gradient updates for mask token
+            # mask token 不做梯度计算
             if hasattr(self.patch_embed, "mask_token"):
                 self.patch_embed.mask_token.requires_grad_(False)
 
@@ -186,7 +190,7 @@ class Aggregator(nn.Module):
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
                 B: batch size, S: sequence length, 3: RGB channels, H: height, W: width
-
+                S 用于兼容多视角图像作为输入，类似 Bev
         Returns:
             (list[torch.Tensor], int):
                 The list of outputs from the attention blocks,
@@ -205,7 +209,7 @@ class Aggregator(nn.Module):
         patch_tokens = self.patch_embed(images)
 
         if isinstance(patch_tokens, dict):
-            patch_tokens = patch_tokens["x_norm_patchtokens"]
+            patch_tokens = patch_tokens["x_norm_patchtokens"]   # 获取 patch_embding
 
         _, P, C = patch_tokens.shape
 
@@ -220,14 +224,21 @@ class Aggregator(nn.Module):
         if self.rope is not None:
             pos = self.position_getter(B * S, H // self.patch_size, W // self.patch_size, device=images.device)
 
+        # 检查是否存在需要特殊处理的非图像token
+        # patch_start_idx = 0：所有token都是图像patch
+        # patch_start_idx = 1：ViT的标准[CLS] token
+        # patch_start_idx = N：包含多个特殊token（如相机token + 注册token）
         if self.patch_start_idx > 0:
             # do not use position embedding for special tokens (camera and register tokens)
             # so set pos to 0 for the special tokens
+            #  将图像patch的位置索引整体偏移+1 ，为特殊token预留0号位置
             pos = pos + 1
+            # [总样本数, 特殊token数, 2]（2表示y/x坐标）
             pos_special = torch.zeros(B * S, self.patch_start_idx, 2).to(images.device).to(pos.dtype)
             pos = torch.cat([pos_special, pos], dim=1)
 
         # update P because we added special tokens
+        # [b*S,pos_special_token(2) + camera_token(1) + register_token(4) + patch_token(14),C]
         _, P, C = tokens.shape
 
         frame_idx = 0
@@ -257,6 +268,7 @@ class Aggregator(nn.Module):
         del global_intermediates
         return output_list, self.patch_start_idx
 
+    # 帧注意力块（frame attention block），主要用于处理视频或序列数据中的时序维度（frame维度）
     def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
         """
         Process frame attention blocks. We keep tokens in shape (B*S, P, C).
@@ -320,8 +332,11 @@ def slice_expand_and_flatten(token_tensor, B, S):
     """
 
     # Slice out the "query" tokens => shape (1, 1, ...)
+    # 1. 提取"查询token"(首帧专用) => 形状从(1,2,X,C)变为(1,1,X,C)，再扩展为(B,1,X,C)
+    # .expand()进行零拷贝扩展后，整个batch的梯度计算会共享同一块原始数据的梯度内存，在反向传播时，会先在batch维度上进行梯度求和，然后再进行梯度更新
     query = token_tensor[:, 0:1, ...].expand(B, 1, *token_tensor.shape[2:])
     # Slice out the "other" tokens => shape (1, S-1, ...)
+    # 2. 提取"其他token"(后续帧共用) => 形状从(1,2,X,C)变为(1,1,X,C), 再扩展为(B,S-1,X,C)
     others = token_tensor[:, 1:, ...].expand(B, S - 1, *token_tensor.shape[2:])
     # Concatenate => shape (B, S, ...)
     combined = torch.cat([query, others], dim=1)

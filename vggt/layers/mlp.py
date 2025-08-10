@@ -12,6 +12,12 @@ from typing import Callable, Optional
 
 from torch import Tensor, nn
 
+# 多层感知机（MLP）模块 , 非线性特征变换：通过两层线性变换+激活函数增强模型表达能力
+# Linear → Activation → Dropout → Linear → Dropout
+# 激活函数选择：
+# GELU	平滑梯度	计算量稍大
+# ReLU	计算快	神经元死亡 当更新梯度过大时(例如使用了较大的学习率),权重衰减到负区间，此时激活函数的导数为0，神经元的权重不再更新，一般可通过 BatchNorm 进行区间调整
+# Swish	平滑性更好	实现复杂
 
 class Mlp(nn.Module):
     def __init__(
@@ -32,9 +38,9 @@ class Mlp(nn.Module):
         self.drop = nn.Dropout(drop)
 
     def forward(self, x: Tensor) -> Tensor:
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.fc2(x)
+        x = self.fc1(x)  # [B, N, D] -> [B, N, 4D]
+        x = self.act(x)  # 非线性变换
+        x = self.drop(x)  # 随机置零
+        x = self.fc2(x)  # [B, N, 4D] -> [B, N, D]
         x = self.drop(x)
         return x

@@ -19,6 +19,7 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                  enable_camera=True, enable_point=True, enable_depth=True, enable_track=True):
         super().__init__()
 
+        # 特征融合
         self.aggregator = Aggregator(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim)
 
         self.camera_head = CameraHead(dim_in=2 * embed_dim) if enable_camera else None
@@ -52,9 +53,10 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                 - conf (torch.Tensor): Confidence scores for tracked points with shape [B, S, N]
         """        
         # If without batch dimension, add it
+        # 如果没有指定 batch szie ，在最外层扩展 batch 维度  [3, 518, 518] -> [1,3, 518, 518]
         if len(images.shape) == 4:
             images = images.unsqueeze(0)
-            
+        # 用于更踪任务的查询特征点
         if query_points is not None and len(query_points.shape) == 2:
             query_points = query_points.unsqueeze(0)
 

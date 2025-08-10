@@ -58,7 +58,7 @@ class PositionGetter:
         cached_positions = self.position_cache[height, width]
         return cached_positions.view(1, height * width, 2).expand(batch_size, -1, -1).clone()
 
-
+# 通过二维旋转矩阵将位置信息注入到token特征中，分别处理垂直和水平方向的位置编码。相比传统的位置嵌入，RoPE具有更好的序列长度外推性和方向感知能力。
 class RotaryPositionEmbedding2D(nn.Module):
     """2D Rotary Position Embedding implementation.
 

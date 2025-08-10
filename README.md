@@ -71,7 +71,7 @@ dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.
 model = VGGT.from_pretrained("facebook/VGGT-1B").to(device)
 
 # Load and preprocess example images (replace with your own image paths)
-image_names = ["path/to/imageA.png", "path/to/imageB.png", "path/to/imageC.png"]  
+image_names = ["path/to/imageA.p`ng", "path/to/imageB.png", "path/to/imageC.png"]  
 images = load_and_preprocess_images(image_names).to(device)
 
 with torch.no_grad():

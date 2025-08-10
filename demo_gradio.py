@@ -25,13 +25,16 @@ from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cpu"
 
 print("Initializing and loading VGGT model...")
 # model = VGGT.from_pretrained("facebook/VGGT-1B")  # another way to load the model
 
-model = VGGT()
-_URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
-model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+# model = VGGT()
+# _URL = "https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt"
+# model.load_state_dict(torch.hub.load_state_dict_from_url(_URL))
+
+model = VGGT.from_pretrained("facebook/VGGT-1B").to(device)
 
 
 model.eval()
@@ -343,7 +346,7 @@ pyramid_video = "examples/videos/pyramid.mp4"
 # -------------------------------------------------------------------------
 # 6) Build Gradio UI
 # -------------------------------------------------------------------------
-theme = gr.themes.Ocean()
+theme = gr.themes.Monochrome()
 theme.set(
     checkbox_label_background_fill_selected="*button_primary_background_fill",
     checkbox_label_text_color_selected="*button_primary_text_color",
